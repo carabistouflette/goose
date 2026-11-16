@@ -363,7 +363,7 @@ struct CodeGen {
     set<string> used;
 
     string Sanitize(string_view name);
-    string Sanitize(string_view ns, string_view name);
+    string Sanitize(NamespaceScope ns, string_view name);
     string Unique(string base);
 
     // ------------------------------------------------------------------

@@ -907,7 +907,7 @@ inline bool WorkspaceSymbols(Workspace &ws, const Json &params, JsonOut &j) {
     set<pair<string, size_t>> seen;
     size_t count = 0;
     j.BeginArray();
-    auto write = [&](const Analysis &an, string_view name, string_view ns, int kind, Place p) {
+    auto write = [&](const Analysis &an, string_view name, NamespaceScope ns, int kind, Place p) {
         if (!p.Known() || !matches(name) || count >= 1000) return;
         auto &f = an.files[(size_t)p.fileidx];
         if (!seen.insert({ f.uri, p.start }).second) return;
@@ -915,7 +915,7 @@ inline bool WorkspaceSymbols(Workspace &ws, const Json &params, JsonOut &j) {
         j.BeginObject();
         j.Member("name", name);
         j.Member("kind", (int64_t)kind);
-        if (!ns.empty()) j.Member("containerName", ns);
+        if (!ns.empty()) j.Member("containerName", ns.name);
         j.Key("location");
         WriteLocation(j, f, p.start, p.start + p.len);
         j.EndObject();
@@ -1748,7 +1748,7 @@ struct Completions {
 
 // The namespace a file's declarations are in: that of the first one the
 // file declares, "" for none.
-inline string_view NamespaceOfFile(const Ast &ast, int fileidx) {
+inline NamespaceScope NamespaceOfFile(const Ast &ast, int fileidx) {
     for (auto sf : ast.functions) if (sf->line.fileidx == fileidx && !sf->isnested) return sf->ns;
     for (auto st : ast.structs) if (st->line.fileidx == fileidx) return st->ns;
     for (auto en : ast.enums) if (en->line.fileidx == fileidx) return en->ns;
@@ -1759,7 +1759,7 @@ inline string_view NamespaceOfFile(const Ast &ast, int fileidx) {
 
 // The declarations of a namespace, as `leaf` or `ns::leaf` spells them
 // from where the completion is.
-inline void NamespaceCompletions(string_view nsname, const Namespace &ns, bool qualify, Completions &out) {
+inline void NamespaceCompletions(NamespaceScope nsname, const Namespace &ns, bool qualify, Completions &out) {
     auto name = [&](string_view leaf) { return qualify ? cat(nsname, "::", leaf) : string(leaf); };
     for (auto &[leaf, fns] : ns.functionmap)
         if (!fns.empty()) out.Add(name(leaf), CK_FUNCTION, 1, FnHeader(fns[0]), fns[0]->doc);

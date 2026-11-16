@@ -11,7 +11,7 @@ namespace goose {
 // In main.cpp.
 vector<string> StdlibDirs(const string &stdlibdir, const string &exe);
 void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlibdirs,
-                  const string &exedir, const SourceProvider &sources);
+                  const string &exedir, const SourceProvider &sources, const PackageGraph *graph);
 int RunOnCompilerStack(const function<int()> &fn);
 
 struct Document {
@@ -304,7 +304,7 @@ struct Workspace {
                 // The parser and the checker go on past the errors they
                 // recover from, which the sink collects; the passes after
                 // the check want a program without any.
-                ParseProgram(ast, r.path, stdlibdirs, DirOf(exe), sources);
+                ParseProgram(ast, r.path, stdlibdirs, DirOf(exe), sources, nullptr);
                 ResolveTypeNames(ast);
                 an->parsed = true;
                 // The source's indexes stand on the tree as written, which

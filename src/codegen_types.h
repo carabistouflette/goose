@@ -367,9 +367,9 @@ inline string CodeGen::Sanitize(string_view name) {
 // keep the mapping injective -- `a::b_c` and `a_b::c` differ in them, and no
 // global name's C form ends in a digit -- without a list of characters to
 // replace.
-inline string CodeGen::Sanitize(string_view ns, string_view name) {
-    if (ns.empty()) return Sanitize(name);
-    return cat(ns, "_", name, "_g", ns.size());
+inline string CodeGen::Sanitize(NamespaceScope ns, string_view name) {
+    auto base = ns.empty() ? Sanitize(name) : cat(ns.name, "_", name, "_g", ns.size());
+    return ns.package < 0 ? base : cat("gp_", ast.packages[ns.package].identity, "_", base);
 }
 
 inline string CodeGen::Unique(string base) {

@@ -74,6 +74,10 @@ jobs:
       - name: Test
         run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang
 
+      - name: Qualify isolated pure-Goose package instances
+        if: runner.os == 'Linux'
+        run: python test/package_identity.py --exe build/goose --cc clang -v
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
