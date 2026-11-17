@@ -5,6 +5,8 @@
 
 namespace goose {
 
+const char *CompilerSourceRevision() { return GOOSE_SOURCE_REVISION; }
+
 const char *CompilerVersion() { return GOOSE_VERSION; }
 
 }  // namespace goose

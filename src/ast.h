@@ -28,6 +28,33 @@ struct CodeGen;
 struct Dst;
 struct ExpansionClone;
 
+// Namespace spelling and compilation ownership are separate. Owner -1 is the
+// legacy/shared toolchain scope. Integer owners are arena handles, never ABI IDs.
+struct NamespaceScope {
+    int package = -1;
+    string_view name;
+    NamespaceScope() = default;
+    NamespaceScope(string_view n) : name(n) {}
+    NamespaceScope(const char *n) : name(n) {}
+    NamespaceScope(int p, string_view n) : package(p), name(n) {}
+    bool empty() const { return name.empty(); }
+    size_t size() const { return name.size(); }
+    NamespaceScope In(string_view n) const { return { package, n }; }
+    bool operator==(const NamespaceScope &other) const { return package == other.package && name == other.name; }
+    bool operator<(const NamespaceScope &other) const {
+        return package != other.package ? package < other.package : name < other.name;
+    }
+};
+inline void CatOne(string &s, NamespaceScope scope) { s += scope.name; }
+
+struct NamespaceSearch {
+    NamespaceScope scopes[3];
+    int count = 0;
+    void Push(NamespaceScope scope) { assert(count < 3); scopes[count++] = scope; }
+    const NamespaceScope *begin() const { return scopes; }
+    const NamespaceScope *end() const { return scopes + count; }
+};
+
 // A place in a source file: the 1-based line, which diagnostics name, and
 // the 1-based byte column, which Parser::CurLine records for every node,
 // type and declaration and the parser's Finish gives the ends of nodes as
@@ -244,7 +271,7 @@ struct TypeName : TypeDetail {       // TY_UNRESOLVED and TY_GENERIC
     int expansionbinding = 0;       // Lexical const-for binding, never a name lookup.
     string_view expansionerror;     // Invalid substitution, diagnosed only when instantiated.
     string_view name;                // As written: `Name`, `ns::Name` or `::Name`.
-    string_view ns;                  // Where an unqualified name resolves first: the
+    NamespaceScope ns;                  // Where an unqualified name resolves first: the
                                      // namespace of the declaration it was written in
                                      // (docs/design/namespaces.md).
     vector<TypeExpr *> args;         // Args on a TY_GENERIC are an error (typecheck).
@@ -278,7 +305,7 @@ struct TypeRef : TypeDetail {        // TY_REF
     // parser saw; typecheck resolves it once, and the pool is part of the
     // type's identity from then on.
     string_view poolname;
-    string_view poolns;              // The namespace poolname resolves in (as TypeName::ns).
+    NamespaceScope poolns;              // The namespace poolname resolves in (as TypeName::ns).
     VarDef *pool = nullptr;
 };
 
@@ -295,7 +322,7 @@ struct TypeVariant : TypeDetail {    // TY_VARIANT
 // type (an alias's uses, `const`) share the detail.
 struct TypeIndex : TypeDetail {
     string_view name;
-    string_view ns;                  // The namespace name resolves in (as TypeName::ns).
+    NamespaceScope ns;                  // The namespace name resolves in (as TypeName::ns).
     VarDef *arr = nullptr;
     bool upto = false;
 };
@@ -988,12 +1015,12 @@ NODE(Ident)
     string_view name;               // As written: `x`, `ns::x` or `::x`. A qualified
                                     // spelling is one interned string, so it can never
                                     // coincide with a local's name.
-    string_view ns;                 // Where an unqualified name resolves first: the
+    NamespaceScope ns;                 // Where an unqualified name resolves first: the
                                     // namespace of the declaration this was written in.
     // Filled by typecheck: exactly one of these.
     VarDef *vdef = nullptr;         // A variable.
     SFunction *fnref = nullptr;     // A named function used as a function value.
-    Ident(Line l, string_view _name, string_view _ns = {}) : Node(l, NKind), name(_name), ns(_ns) {}
+    Ident(Line l, string_view _name, NamespaceScope _ns = {}) : Node(l, NKind), name(_name), ns(_ns) {}
 NODE_END
 
 NODE(ArrayLit)
@@ -1067,7 +1094,7 @@ NODE(Dot)
     BCE_MARK
     Node *obj;
     string_view name;
-    string_view ns;                 // For a UFCS call: the namespace of the declaration
+    NamespaceScope ns;                 // For a UFCS call: the namespace of the declaration
                                     // this was written in, where the function resolves first.
     // Filled by typecheck: field access, builtin property (.len/.cap), or a
     // payload-less variant constant (obj names the enum type).
@@ -1079,7 +1106,7 @@ NODE(Dot)
     // an empty name: a completion asks for its object's type, which the
     // checker records before it stops the body here (Abandoned).
     bool incomplete = false;
-    Dot(Line l, Node *_obj, string_view _name, string_view _ns = {})
+    Dot(Line l, Node *_obj, string_view _name, NamespaceScope _ns = {})
         : Node(l, NKind), obj(_obj), name(_name), ns(_ns) {}
     // A field, which lies in its object's storage: a path, as codegen
     // addresses it (CodeGen::GenLoc). A property or a variant constant is a
@@ -1371,7 +1398,7 @@ NODE(Return)
     BCE_WALK
     vector<Node *> vals;
     string_view from;           // "return ... from f"; empty if absent. As written (Ident::name).
-    string_view ns;             // The namespace `from` resolves in first (Ident::ns).
+    NamespaceScope ns;             // The namespace `from` resolves in first (Ident::ns).
     SFunction *target = nullptr;  // Filled by typecheck (the fn this exits; `from` or own).
     FnSpec *targetspec = nullptr; // Its concrete return contract and propagation channel.
     Return(Line l) : Node(l, NKind) {}
@@ -1420,7 +1447,7 @@ NODE(VarDecl)
     bool isglobal = false;
     bool byref = false;         // `x .= e`: bound by reference, no decay (§3.8).
     bool inline_arg = false;    // Synthesized call argument: caller-scope storage.
-    string_view ns;             // A global's namespace ("" = global; docs/design/namespaces.md).
+    NamespaceScope ns;             // A global's namespace ("" = global; docs/design/namespaces.md).
     string_view doc;            // The comment lines above it (Lexer::doc).
     vector<string_view> names;  // let a, b = f();
     // The results of `a, b = f();`, which the assignments after it in its
@@ -1473,7 +1500,7 @@ NODE_END
 
 struct SFunction {
     string_view name;           // The leaf name, as lexical lookups and diagnostics use it.
-    string_view ns;             // Its namespace, "" for the global one (docs/design/namespaces.md).
+    NamespaceScope ns;             // Its namespace, "" for the global one (docs/design/namespaces.md).
     string_view qname;          // `ns::name`, or just name in the global namespace; interned in Ast.
     Line line;
     Line end;                   // One past the declaration's last byte (its `}` or `;`).
@@ -1529,7 +1556,7 @@ struct SFunction {
 
 struct SStruct {
     string_view name;
-    string_view ns;             // As SFunction::ns / qname.
+    NamespaceScope ns;             // As SFunction::ns / qname.
     string_view qname;
     Line line;
     Line end;                   // As SFunction::end.
@@ -1560,7 +1587,7 @@ struct SVariant {
 
 struct SEnum {
     string_view name;
-    string_view ns;             // As SFunction::ns / qname.
+    NamespaceScope ns;             // As SFunction::ns / qname.
     string_view qname;
     Line line;
     Line end;                   // As SFunction::end.
@@ -1605,7 +1632,7 @@ inline bool EmptyLayout(const vector<Field> &fields) {
 // resolution; the symbol remains for the declaration itself and lookups.
 struct SAlias {
     string_view name;
-    string_view ns;             // As SFunction::ns / qname.
+    NamespaceScope ns;             // As SFunction::ns / qname.
     string_view qname;
     Line line;
     Line end;                   // As SFunction::end.
@@ -1614,7 +1641,7 @@ struct SAlias {
 };
 
 // The namespace a nominal type was declared in; "" for every other type.
-inline string_view NominalNs(const TypeExpr *t) {
+inline NamespaceScope NominalNs(const TypeExpr *t) {
     switch (t->kind) {
         case TY_STRUCT:  return t->struc->st->ns;
         case TY_ENUM:    return t->enu->en->ns;
@@ -2390,14 +2417,14 @@ struct Namespace {
 // qualifier, else the namespace the reference was written in.
 struct NameRef {
     string_view leaf;
-    string_view ns;
+    NamespaceScope ns;
     bool qualified = false;      // Search ns alone, never the global fallback.
 };
 
-inline NameRef SplitName(string_view name, string_view usens) {
+inline NameRef SplitName(string_view name, NamespaceScope usens) {
     auto pos = name.find("::");
     if (pos == string_view::npos) return { name, usens, false };
-    return { name.substr(pos + 2), name.substr(0, pos), true };
+    return { name.substr(pos + 2), usens.In(name.substr(0, pos)), true };
 }
 
 // The leaf of `::name`, for the builtins, which are global; any other
@@ -2450,6 +2477,10 @@ struct Package {
     vector<DylibSpelling> dylibs;           // The sidecar's, by name, each once.
     string output;                          // A program's executable, relative to its root.
     vector<int> required;                   // The packages its files require (§4.3), by index.
+
+    // Resolved graph metadata; empty identity means legacy acquisition.
+    string identity, entry, entry_namespace;
+    map<string, int> bindings;
 
     bool HasNative() const { return !csources.empty() || !cmake_target.empty(); }
 };
@@ -2528,6 +2559,7 @@ struct Ast {
         d.message = std::move(message);
         Warn(std::move(d));
     }
+    bool package_graph = false;
     vector<Package> packages;
     vector<int> filepkg;                                // Per source, its package.
     bool StdlibFile(int fileidx) const {
@@ -2575,7 +2607,7 @@ struct Ast {
 
     // Declarations, by namespace. Qualified spellings (`ns::name`) are
     // interned here: the lexer delivers their parts as separate tokens.
-    map<string_view, Namespace> namespaces;
+    map<NamespaceScope, Namespace> namespaces;
     deque<string> interned;
 
     // Shared instances of the primitive types.
@@ -2812,66 +2844,85 @@ struct Ast {
 
     // A declaration's qualified name: `ns::leaf`, or the leaf itself in the
     // global namespace.
-    string_view QualifiedName(string_view ns, string_view leaf) {
-        return ns.empty() ? leaf : Intern(cat(ns, "::", leaf));
+    string_view QualifiedName(NamespaceScope ns, string_view leaf) {
+        if (ns.package < 0 && ns.empty()) return leaf;
+        auto spelling = ns.empty() ? string(leaf) : cat(ns.name, "::", leaf);
+        if (ns.package >= 0) spelling = cat(packages[ns.package].name, "@", packages[ns.package].identity.substr(0, 12), "::", spelling);
+        return Intern(std::move(spelling));
     }
 
-    Namespace &NS(string_view ns) { return namespaces[ns]; }
-    Namespace *FindNS(string_view ns) {
+    Namespace &NS(NamespaceScope ns) { return namespaces[ns]; }
+    Namespace *FindNS(NamespaceScope ns) {
         auto it = namespaces.find(ns);
         return it == namespaces.end() ? nullptr : &it->second;
     }
 
-    // The one lookup rule for every declaration kind: a qualified name names
-    // its namespace alone; an unqualified one is searched in the namespace it
-    // is used from, then in the global one. Returns the map entry, or null.
+    // Binding aliases resolve in the definition's package, never in a global
+    // current-package variable. Scope survives clones and generic instantiation.
+    NameRef ResolveName(string_view name, NamespaceScope context) {
+        auto ref = SplitName(name, context);
+        if (context.package < 0 || !ref.qualified) return ref;
+        auto separator = name.find("::");
+        auto qualifier = name.substr(0, separator);
+        auto binding = packages[context.package].bindings.find(string(qualifier));
+        if (binding != packages[context.package].bindings.end()) {
+            if (FindNS(context.In(qualifier))) throw CompileError { cat("ambiguous package alias and namespace: ", qualifier) };
+            auto owner = binding->second;
+            auto nested = ref.leaf.find("::");
+            return nested == string_view::npos
+                ? NameRef { ref.leaf, { owner, packages[owner].entry_namespace }, true }
+                : NameRef { ref.leaf.substr(nested + 2), { owner, ref.leaf.substr(0, nested) }, true };
+        }
+        if (!qualifier.empty() && !FindNS(ref.ns) && FindNS(NamespaceScope(qualifier))) ref.ns = NamespaceScope(qualifier);
+        return ref;
+    }
+    NamespaceSearch LookupScopes(const NameRef &ref) {
+        NamespaceSearch scopes; scopes.Push(ref.ns);
+        if (ref.ns.package < 0) {
+            if (!ref.qualified && !ref.ns.empty()) scopes.Push({});
+        } else if (!ref.qualified) {
+            if (!ref.ns.empty()) scopes.Push(ref.ns.In(""));
+            scopes.Push({});
+        } else if (ref.ns.empty()) scopes.Push({});
+        return scopes;
+    }
     template<typename T>
-    T *Lookup(unordered_map<string_view, T> Namespace::*map, string_view name,
-              string_view usens) {
-        auto ref = SplitName(name, usens);
-        if (auto n = FindNS(ref.ns))
+    T *Lookup(unordered_map<string_view, T> Namespace::*map, string_view name, NamespaceScope context) {
+        auto ref = ResolveName(name, context);
+        for (auto scope : LookupScopes(ref)) if (auto n = FindNS(scope))
             if (auto it = (n->*map).find(ref.leaf); it != (n->*map).end()) return &it->second;
-        if (ref.qualified || ref.ns.empty()) return nullptr;
-        auto n = FindNS("");
-        if (!n) return nullptr;
-        auto it = (n->*map).find(ref.leaf);
-        return it == (n->*map).end() ? nullptr : &it->second;
+        return nullptr;
     }
-
-    // Structs, enums and aliases share one type namespace. Choose the nearest
-    // declaration before inspecting its kind: a local alias must shadow a
-    // global struct just as a local struct would (§11.1).
+    // A nearer alias/enum shadows a farther struct of the same name.
     template<typename T>
-    T *LookupType(unordered_map<string_view, T> Namespace::*map, string_view name,
-                  string_view usens) {
-        auto ref = SplitName(name, usens);
-        auto n = FindNS(ref.ns);
-        if ((!n || !n->TypeNameExists(ref.leaf)) && !ref.qualified && !ref.ns.empty())
-            n = FindNS("");
-        if (!n) return nullptr;
-        auto it = (n->*map).find(ref.leaf);
-        return it == (n->*map).end() ? nullptr : &it->second;
+    T *LookupType(unordered_map<string_view, T> Namespace::*map, string_view name, NamespaceScope context) {
+        auto ref = ResolveName(name, context);
+        for (auto scope : LookupScopes(ref)) if (auto n = FindNS(scope); n && n->TypeNameExists(ref.leaf)) {
+            auto it = (n->*map).find(ref.leaf);
+            return it == (n->*map).end() ? nullptr : &it->second;
+        }
+        return nullptr;
     }
 
-    SStruct *LookupStruct(string_view name, string_view usens) {
+    SStruct *LookupStruct(string_view name, NamespaceScope usens) {
         auto p = LookupType(&Namespace::structmap, name, usens);
         return p ? *p : nullptr;
     }
-    SEnum *LookupEnum(string_view name, string_view usens) {
+    SEnum *LookupEnum(string_view name, NamespaceScope usens) {
         auto p = LookupType(&Namespace::enummap, name, usens);
         return p ? *p : nullptr;
     }
-    SAlias *LookupAlias(string_view name, string_view usens) {
+    SAlias *LookupAlias(string_view name, NamespaceScope usens) {
         auto p = LookupType(&Namespace::aliasmap, name, usens);
         return p ? *p : nullptr;
     }
-    VarDecl *LookupGlobal(string_view name, string_view usens) {
+    VarDecl *LookupGlobal(string_view name, NamespaceScope usens) {
         auto p = Lookup(&Namespace::globalmap, name, usens);
         return p ? *p : nullptr;
     }
     // A function name's overload set: that of the first namespace in lookup
     // order that declares the name at all. Sets never merge across namespaces.
-    const vector<SFunction *> &LookupFunctions(string_view name, string_view usens) {
+    const vector<SFunction *> &LookupFunctions(string_view name, NamespaceScope usens) {
         static const vector<SFunction *> none;
         auto p = Lookup(&Namespace::functionmap, name, usens);
         return p ? *p : none;
@@ -2880,10 +2931,10 @@ struct Ast {
     // namespace the receiver's nominal type is declared in, where that is a
     // named namespace declaring the name, else the call's own. A type's
     // functions are its methods wherever it is used (§11.1).
-    const vector<SFunction *> &LookupMethods(string_view name, string_view usens,
+    const vector<SFunction *> &LookupMethods(string_view name, NamespaceScope usens,
                                              const TypeExpr *recv) {
         auto tns = NominalNs(recv);
-        if (auto n = tns.empty() ? nullptr : FindNS(tns))
+        if (auto n = tns.empty() && tns.package < 0 ? nullptr : FindNS(tns))
             if (auto it = n->functionmap.find(name); it != n->functionmap.end()) return it->second;
         return LookupFunctions(name, usens);
     }
@@ -2891,7 +2942,7 @@ struct Ast {
     // The entry point: the root file's global `main` (an imported file's is
     // never registered, §11.1). Null when there is not exactly one.
     SFunction *MainFunction() {
-        auto n = FindNS("");
+        auto n = FindNS(package_graph ? NamespaceScope(0, "") : NamespaceScope());
         if (!n) return nullptr;
         auto it = n->functionmap.find("main");
         return it != n->functionmap.end() && it->second.size() == 1 ? it->second[0] : nullptr;

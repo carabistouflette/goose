@@ -1428,7 +1428,7 @@ struct TypeCheck {
     Roots MapClass(FnSpec *spec, VarDef *root, const vector<Val> &args);
     VarDef *NewVar(string_view name, TypeExpr *type, Line l, bool isvar,
                    VarDef *previous = nullptr);
-    VarDef *LookupVar(string_view name, string_view ns, Node *use = nullptr);
+    VarDef *LookupVar(string_view name, NamespaceScope ns, Node *use = nullptr);
     const char *ScopeNameKind(string_view name);
 
     // The variables the body frame fi checks can name outside its own
@@ -2479,7 +2479,7 @@ struct TypeCheck {
     void CheckRenderable(Call *c, const char *what, TypeExpr *t, Node *at, RenderSeen &seen,
                          Val value, const Val &out);
     FnSpec *UserFormat(Call *c, TypeExpr *t, const Val &value, const Val &out, Node *arg);
-    FnSpec *UserFormatIn(Call *c, TypeExpr *t, string_view ns, const Val &value, const Val &out,
+    FnSpec *UserFormatIn(Call *c, TypeExpr *t, NamespaceScope ns, const Val &value, const Val &out,
                          Node *arg);
     StrLit *ConstStrLit(Node *n);
     const string *EmbedShader(Call *c, vector<Node *> &args);

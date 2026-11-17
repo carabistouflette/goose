@@ -21,6 +21,8 @@ add_executable(goose
     src/toolchain.h
     src/build.h
     src/packages.h
+    src/package_identity.h
+    src/package_graph.h
     src/json.h
     src/native.h
     src/lsp_rpc.h

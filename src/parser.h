@@ -68,8 +68,8 @@ struct Parser {
     // and the namespace of the declaration being parsed -- the file's, or the
     // one a qualified declaration name spells -- which every name reference
     // written inside it records as where it resolves first.
-    string_view filens;
-    string_view curns;
+    NamespaceScope filens;
+    NamespaceScope curns;
     bool declseen = false;           // The directive must come before any declaration.
 
     // Recovery (docs/design/language_server.md §5 D): a statement or a
@@ -94,7 +94,10 @@ struct Parser {
     bool eoferror = false;
 
     Parser(Ast &_ast, string_view filename, const char *source, int _fileidx)
-        : ast(_ast), lex(filename, source, _fileidx), fileidx(_fileidx) {}
+        : ast(_ast), lex(filename, source, _fileidx), fileidx(_fileidx) {
+        if (ast.package_graph && !ast.packages[ast.filepkg[fileidx]].stdlib)
+            filens = curns = NamespaceScope(ast.filepkg[fileidx], "");
+    }
 
     [[noreturn]] void Error(const string &msg) { lex.Error(msg); }
 
@@ -351,7 +354,9 @@ struct Parser {
         if (IsNext(T_COLONCOLON)) return ast.Intern(cat("::", ExpectIdent(context)));
         auto name = ExpectIdent(context);
         if (!IsNext(T_COLONCOLON)) return name;
-        return ast.Intern(cat(name, "::", ExpectIdent(context)));
+        name = ast.Intern(cat(name, "::", ExpectIdent(context)));
+        if (ast.package_graph && IsNext(T_COLONCOLON)) name = ast.Intern(cat(name, "::", ExpectIdent(context)));
+        return name;
     }
 
     string_view ParseStorageName(const char *context) {
@@ -367,13 +372,15 @@ struct Parser {
     string_view ParseDeclName(const char *context) {
         auto name = lex.tok == T_COLONCOLON ? string_view {} : ExpectIdent(context);
         if (IsNext(T_COLONCOLON)) {
-            curns = name;
+            if (filens.package >= 0 && ast.packages[filens.package].bindings.count(string(name)))
+                Error("a declaration cannot define a dependency's namespace");
+            curns = filens.In(name);
             name = ExpectIdent(context);
         }
         return name;
     }
 
-    string QualifiedStr(string_view ns, string_view name) {
+    string QualifiedStr(NamespaceScope ns, string_view name) {
         return ns.empty() ? string(name) : cat(ns, "::", name);
     }
 
@@ -419,7 +426,7 @@ struct Parser {
                 lex.Next();
                 if (!filens.empty()) Error("namespace declared twice in this file");
                 if (declseen) Error("the namespace declaration must precede all declarations");
-                filens = ExpectIdent("namespace declaration");
+                filens = filens.In(ExpectIdent("namespace declaration"));
                 Expect(T_SEMI, "namespace declaration");
                 curns = filens;
                 return;
@@ -514,7 +521,7 @@ struct Parser {
         }
     }
 
-    void CheckFreshTypeName(string_view ns, string_view name) {
+    void CheckFreshTypeName(NamespaceScope ns, string_view name) {
         if (auto n = ast.FindNS(ns); n && n->TypeNameExists(name))
             Error(cat("type name already declared: ", QualifiedStr(ns, name)));
     }

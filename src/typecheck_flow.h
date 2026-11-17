@@ -730,7 +730,7 @@ inline VarDef *TypeCheck::NewVar(string_view name, TypeExpr *type, Line l, bool 
 // globals, in the namespace order of docs/design/namespaces.md, unless a type
 // parameter or nested function of the name hides them (§11.1). What a body
 // finds outside its own scopes, at `use`, is part of its key (NoteEnvRead).
-inline VarDef *TypeCheck::LookupVar(string_view name, string_view ns, Node *use) {
+inline VarDef *TypeCheck::LookupVar(string_view name, NamespaceScope ns, Node *use) {
     auto top = (int)frames.size() - 1;
     for (auto i = (int)vars.size() - 1; i >= frames[top].varbase; i--)
         if (vars[i]->name == name) return vars[i];

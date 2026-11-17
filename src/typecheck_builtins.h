@@ -881,10 +881,12 @@ inline FnSpec *TypeCheck::UserFormat(Call *c, TypeExpr *t, const Val &value, con
                                      Node *arg) {
     auto tns = NominalNs(t);
     if (auto sp = UserFormatIn(c, t, tns, value, out, arg)) return sp;
-    return tns.empty() ? nullptr : UserFormatIn(c, t, {}, value, out, arg);
+    if (tns.package >= 0 && !tns.empty())
+        if (auto sp = UserFormatIn(c, t, tns.In(""), value, out, arg)) return sp;
+    return tns.empty() && tns.package < 0 ? nullptr : UserFormatIn(c, t, {}, value, out, arg);
 }
 
-inline FnSpec *TypeCheck::UserFormatIn(Call *c, TypeExpr *t, string_view ns,
+inline FnSpec *TypeCheck::UserFormatIn(Call *c, TypeExpr *t, NamespaceScope ns,
                                       const Val &value, const Val &out, Node *arg) {
     auto n = ast.FindNS(ns);
     if (!n) return nullptr;

@@ -83,6 +83,8 @@ inline const vector<Json> &Json::Arr(const string &key) const {
 struct JsonReader {
     const char *p;
     const char *start;
+    bool strict = false;
+    int depth = 0, values = 0;
 
     [[noreturn]] void Fail(const char *what) {
         throw CompileError { cat("malformed JSON at byte ", (int)(p - start), ": ", what) };
@@ -121,7 +123,10 @@ struct JsonReader {
             auto c = *p++;
             if (!c) Fail("unterminated string");
             if (c == '"') return s;
-            if (c != '\\') { s += c; continue; }
+            if (c != '\\') {
+                if (strict && (uint8_t)c < 32) Fail("unescaped control character");
+                s += c; continue;
+            }
             c = *p++;
             switch (c) {
                 case '"': case '\\': case '/': s += c; break;
@@ -135,8 +140,10 @@ struct JsonReader {
                     if (cp >= 0xD800 && cp < 0xDC00 && p[0] == '\\' && p[1] == 'u') {
                         p += 2;
                         auto lo = Hex4();
+                        if (strict && (lo < 0xDC00 || lo > 0xDFFF)) Fail("invalid surrogate pair");
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     }
+                    if (strict && cp >= 0xD800 && cp <= 0xDFFF) Fail("unpaired surrogate");
                     Utf8(s, cp);
                     break;
                 }
@@ -145,16 +152,20 @@ struct JsonReader {
         }
     }
     Json Value() {
+        if (strict && (++depth > 64 || ++values > 100000)) Fail("JSON resource limit exceeded");
+        struct Depth { JsonReader &r; ~Depth() { if (r.strict) --r.depth; } } guard { *this };
         Space();
         Json v;
         switch (*p) {
-            case '{':
+            case '{': {
                 v.kind = Json::OBJECT;
+                set<string> keys;
                 p++;
                 Space();
                 if (*p == '}') { p++; return v; }
                 for (;;) {
                     auto key = String();
+                    if (strict && !keys.insert(key).second) Fail("duplicate object key");
                     Expect(':');
                     v.obj.emplace_back(key, Value());
                     Space();
@@ -162,6 +173,7 @@ struct JsonReader {
                     Expect('}');
                     return v;
                 }
+            }
             case '[':
                 v.kind = Json::ARRAY;
                 p++;
@@ -188,9 +200,19 @@ struct JsonReader {
                 return v;
             }
             default: {
+                const char *numberend = nullptr;
+                if (strict) {
+                    auto q = p;
+                    if (*q == '-') ++q;
+                    if (*q == '0') { ++q; if (isdigit((unsigned char)*q)) Fail("leading zero"); }
+                    else { if (*q < '1' || *q > '9') Fail("invalid number"); while (isdigit((unsigned char)*q)) ++q; }
+                    if (*q == '.') { ++q; if (!isdigit((unsigned char)*q)) Fail("invalid fraction"); while (isdigit((unsigned char)*q)) ++q; }
+                    if (*q == 'e' || *q == 'E') { ++q; if (*q == '+' || *q == '-') ++q; if (!isdigit((unsigned char)*q)) Fail("invalid exponent"); while (isdigit((unsigned char)*q)) ++q; }
+                    numberend = q;
+                }
                 char *end;
                 v.num = strtod(p, &end);
-                if (end == p) Fail("unexpected character");
+                if (end == p || (strict && (end != numberend || !isfinite(v.num)))) Fail("invalid number");
                 v.kind = Json::NUMBER;
                 p = end;
                 return v;

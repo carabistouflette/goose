@@ -141,6 +141,10 @@ struct Server {
         if (!m.id.empty() && AsksAboutDocuments(method)) ws.Settle();
         if (method == "initialize") {
             auto options = p.Get("initializationOptions");
+            if (options && options->Get("packageGraph")) {
+                RespondError(m, -32602, "resolved package graphs are not supported by LSP yet");
+                return true;
+            }
             ws.Configure(options);
             if (auto commands = options ? options->Get("commands") : nullptr; commands && commands->kind == Json::ARRAY)
                 for (auto &c : commands->arr)
@@ -169,7 +173,20 @@ struct Server {
             if (auto td = p.Get("textDocument")) ws.Close(JsonStr(td->Get("uri")));
         } else if (method == "workspace/didChangeConfiguration") {
             auto settings = p.Get("settings");
-            ws.Configure(settings ? settings->Get("goose") : nullptr);
+            auto options = settings ? settings->Get("goose") : nullptr;
+            if (options && options->Get("packageGraph")) {
+                JsonOut j;
+                j.BeginObject();
+                j.Member("jsonrpc", "2.0");
+                j.Member("method", "window/showMessage");
+                j.Key("params");
+                j.BeginObject();
+                j.Member("type", (int64_t)1);
+                j.Member("message", "resolved package graphs are not supported by LSP yet; configuration rejected");
+                j.EndObject();
+                j.EndObject();
+                rpc.Send(j.s);
+            } else ws.Configure(options);
         } else if (method == "workspace/didChangeWatchedFiles") {
             if (auto changes = p.Get("changes"); changes && changes->kind == Json::ARRAY)
                 for (auto &c : changes->arr) {

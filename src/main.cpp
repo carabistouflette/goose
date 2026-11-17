@@ -48,6 +48,8 @@
 #include "builtin.h"
 #include "build.h"
 #include "packages.h"
+#include "package_identity.h"
+#include "package_graph.h"
 #include "native.h"
 #include "format.h"
 #include "lsp_rpc.h"
@@ -60,6 +62,7 @@ namespace goose {
 
 // In version.cpp: the compiler's version, as the build found it.
 const char *CompilerVersion();
+const char *CompilerSourceRevision();
 
 string DirOf(const string &path) {
     auto pos = path.find_last_of("/\\");
@@ -191,12 +194,28 @@ static Diagnostic ImportDiagnostic(const string &file, const Import &imp, const 
 // would have loaded: the names it would have declared are unknown where
 // they are used.
 void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlibdirs,
-                  const string &exedir, const SourceProvider &sources = {}) {
+                  const string &exedir, const SourceProvider &sources = {}, const PackageGraph *graph = nullptr) {
     // The program is package 0; a standard library directory becomes a
     // package the first time a module in it is reached.
     auto rootdir = DirOf(rootpath);
-    ast.packages.push_back(Package { PathStem(rootpath), rootdir, false });
-    LoadSidecar(ast.packages[0], true);
+    ast.package_graph = graph != nullptr;
+    if (graph) {
+        for (auto &node : graph->nodes) {
+            Package package { node.name, PackageDir(node.directory), false };
+            package.identity = node.identity; package.entry = node.entry;
+            package.entry_namespace = node.entry_namespace; package.bindings = node.bindings;
+            for (auto &[alias, target] : node.bindings) package.required.push_back(target);
+            LoadSidecar(package, ast.packages.empty());
+            if (package.HasNative() || !package.cheaders.empty() || !package.dylibs.empty() ||
+                !package.cdefines.empty() || !package.clibs.empty() || !package.cflags_cc.empty() ||
+                !package.cflags_msvc.empty() || !package.cincludes.empty())
+                GraphError(cat("native configuration is not supported in the pure-Goose graph milestone: ", node.name));
+            ast.packages.push_back(std::move(package));
+        }
+    } else {
+        ast.packages.push_back(Package { PathStem(rootpath), rootdir, false });
+        LoadSidecar(ast.packages[0], true);
+    }
     auto stdlibpkg = [&](const string &dir) {
         for (size_t i = 0; i < ast.packages.size(); i++)
             if (ast.packages[i].stdlib && ast.packages[i].root == dir) return (int)i;
@@ -247,7 +266,10 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
         return (int)ast.packages.size() - 1;
     };
     vector<pair<string, int>> queue = { { rootpath, 0 } };   // (path, its package).
-    set<string> loaded = { rootpath };
+    auto unitkey = [&](int owner, const string &path) {
+        return graph ? cat(owner, ":", GraphPath(path)) : path;
+    };
+    set<string> loaded = { unitkey(0, rootpath) };
     map<string, int> fileof;                 // Resolved path -> index in ast.sources.
     vector<vector<string>> importsof;        // Per source, the paths it imports.
     // An imported file's first import, where an error opening it is.
@@ -263,7 +285,7 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
             *contents = *text;
             StripBom(*contents);
         } else if (!LoadSource(path, *contents)) {
-            auto it = importedat.find(path);
+            auto it = importedat.find(unitkey(pkg, path));
             if (it == importedat.end()) throw CompileError { cat("cannot open file: ", path) };
             ast.Report(ImportDiagnostic(it->second.first, it->second.second,
                                         cat("cannot open file: ", path)));
@@ -272,18 +294,49 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
         auto fileidx = (int)ast.sources.size();
         ast.sources.emplace_back(path, std::move(contents));
         ast.filepkg.push_back(pkg);
-        fileof[path] = fileidx;
+        fileof[unitkey(pkg, path)] = fileidx;
         importsof.emplace_back();
         auto &[filename, source] = ast.sources.back();
         Parser parser(ast, filename, source->c_str(), fileidx);
         parser.ParseTop();
+        if (graph && !ast.packages[pkg].stdlib && GraphPath(path) == GraphPath(ast.packages[pkg].root + ast.packages[pkg].entry) &&
+            parser.filens.name != ast.packages[pkg].entry_namespace)
+            GraphError(cat("entry namespace mismatch for ", ast.packages[pkg].name));
         for (auto &imp : parser.imports) {
             // The package this import declares or loads, where it does.
             string pkgname;
             try {
                 auto imppkg = pkg;
                 string imppath;
-                if (!imp.source.empty()) {
+                if (graph) {
+                    auto &owner = ast.packages[pkg];
+                    if (!imp.source.empty()) ImportError(filename, imp, "resolved graph imports must omit sources; the producer supplies dependency bindings");
+                    if (imp.relative) {
+                        imppath = GraphPath(cat(DirOf(path), imp.path, ".goose"));
+                        if (!GraphContains(owner.root, imppath)) ImportError(filename, imp, "relative import escapes its package");
+                    } else {
+                        auto first = imp.path.substr(0, imp.path.find('/'));
+                        auto binding = owner.bindings.find(first);
+                        auto local = GraphPath(cat(owner.root, imp.path, ".goose"));
+                        if (binding != owner.bindings.end()) {
+                            if (FileExists(local)) ImportError(filename, imp, "module is both a local file and a dependency binding");
+                            imppkg = binding->second;
+                            auto rest = imp.path.size() > first.size() ? imp.path.substr(first.size()+1) + ".goose" : ast.packages[imppkg].entry;
+                            imppath = GraphPath(ast.packages[imppkg].root + rest);
+                            if (!GraphContains(ast.packages[imppkg].root, imppath)) ImportError(filename, imp, "dependency import escapes its package");
+                        } else if (FileExists(local)) {
+                            if (!GraphContains(owner.root, local)) ImportError(filename, imp, "local import escapes its package");
+                            imppath = local;
+                        }
+                        else {
+                            for (auto &dir : stdlibdirs) {
+                                auto candidate = GraphPath(cat(dir, imp.path, ".goose"));
+                                if (FileExists(candidate)) { imppkg = stdlibpkg(dir); imppath = candidate; break; }
+                            }
+                            if (imppath.empty()) ImportError(filename, imp, cat("no local module or package binding for ", first));
+                        }
+                    }
+                } else if (!imp.source.empty()) {
                     if (failedpkgs.count(imp.path)) continue;
                     pkgname = imp.path;
                     PackageSource src;
@@ -416,11 +469,11 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
                         }
                     }
                 }
-                importsof[fileidx].push_back(imppath);
+                importsof[fileidx].push_back(unitkey(imppkg, imppath));
                 ast.imports.push_back({ imp.line, imp.end, imppath });
-                if (loaded.insert(imppath).second) {
+                if (loaded.insert(unitkey(imppkg, imppath)).second) {
                     queue.push_back({ imppath, imppkg });
-                    importedat.emplace(imppath, make_pair(filename, imp));
+                    importedat.emplace(unitkey(imppkg, imppath), make_pair(filename, imp));
                 }
             } catch (CompileError &e) {
                 if (e.diags.empty()) ast.Report(ImportDiagnostic(filename, imp, e.msg));
@@ -429,6 +482,9 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
             }
         }
     }
+    if (graph) for (auto function : ast.functions)
+        if ((function->isextern || function->isexport) && !ast.StdlibFile(function->line.fileidx))
+            GraphError(cat("foreign extern/export is unsupported in the pure-Goose graph milestone: ", function->qname));
     // Globals initialize in import order: everything a file imports runs before
     // the file's own, so a global initializer may name an imported global
     // (`let IDENT = Xf { ..., t: float3_0 }`). Files parse in worklist order,
@@ -711,6 +767,9 @@ Common options:
                   they fail on.
   --stats         Print what the compile did (declarations, bounds checks
                   removed, files written).
+  --package-graph file
+                  Experimental resolved pure-Goose graph; see
+                  docs/design/package_graph.md. Never fetches dependencies.
   --color when    Color errors and warnings: auto (on a terminal, unless
                   NO_COLOR is set), always or never.
   -- args...      What follows is the program's arguments.
@@ -1336,12 +1395,24 @@ int Main(int argc, char **argv) {
         return 0;
     }
     if (verb == "version") {
+        if (firstarg < argc && string(argv[firstarg]) == "--json") {
+            string report = "{\"schema\":1,\"compiler_revision\":";
+            JsonQuote(report, CompilerSourceRevision()); report += ",\"compiler_version\":";
+            JsonQuote(report, CompilerVersion()); report += ",\"runtime\":";
+            JsonQuote(report, RuntimeVersion()); report += ",\"package_graph\":\"goose-package-graph-v1\",\"package_graph_native\":false,\"package_graph_tooling\":false}\n";
+            fputs(report.c_str(), stdout); return 0;
+        }
         printf("goose %s (runtime %s)\n", CompilerVersion(), RuntimeVersion().c_str());
         return 0;
     }
-    if (verb == "lsp") return RunLsp(exe, vector<string>(argv + firstarg, argv + argc));
+    if (verb == "lsp") {
+        for (int i = firstarg; i < argc; ++i) if (string(argv[i]) == "--package-graph") {
+            fprintf(stderr, "resolved package graphs are not supported by LSP yet\n"); return 1;
+        }
+        return RunLsp(exe, vector<string>(argv + firstarg, argv + argc));
+    }
     if (verb == "format") return RunFormat(vector<string>(argv + firstarg, argv + argc));
-    string outname, headername, stdlibdir, shaderfile, shadersource, dumpfile;
+    string outname, headername, stdlibdir, shaderfile, shadersource, dumpfile, packagegraphfile;
     auto dump = false, dumpdocs = false, tokens = false, parseonly = false, specs = false;
     auto nocgen = false;
     auto roundtrip = false, multitest = false;
@@ -1363,7 +1434,8 @@ int Main(int argc, char **argv) {
             for (int j = i + 1; j < argc; j++) progargs.push_back(argv[j]);
             break;
         }
-        if (arg == "--dump") dump = true;
+        if (arg == "--package-graph" && i + 1 < argc) packagegraphfile = argv[++i];
+        else if (arg == "--dump") dump = true;
         else if (arg == "--tokens") tokens = true;
         else if (arg == "--parse") parseonly = true;
         else if (arg == "--roundtrip") roundtrip = true;
@@ -1478,6 +1550,9 @@ int Main(int argc, char **argv) {
     }
     if (verbose || dryrun) ProgressPlain();
     if (verb == "toolchain") {
+        if (!packagegraphfile.empty()) {
+            fprintf(stderr, "resolved package graphs are not supported by toolchain\n"); return 1;
+        }
         try {
             auto tools = FindTools(ccrequest, refresh);
             // The modules a program can import without a build: those of
@@ -1574,6 +1649,11 @@ int Main(int argc, char **argv) {
     // as they come, then the error's.
     vector<Diagnostic> found;
     auto compile = [&]() -> int {
+        auto customdefines = any_of(cdefines.begin(), cdefines.end(), [&](const string &d) {
+            return !(debug && d == "GS_DEBUG=1") && d.rfind("GS_STACK_RESERVE=", 0) != 0;
+        });
+        if (!packagegraphfile.empty() && (dump || dumpdocs || roundtrip || !dumpfile.empty() || !headername.empty() || multitest || tokens || !includenames.empty() || customdefines))
+            GraphError("dump/roundtrip/header/multi-test/token/C-define modes are not supported with a resolved package graph yet");
         if (tokens) {
             DumpTokens(filename);
             return 0;
@@ -1582,7 +1662,12 @@ int Main(int argc, char **argv) {
         auto &ast = *astp;
         if (jsondiag) ast.sink = [&](const Diagnostic &d) { found.push_back(d); };
         auto stdlibdirs = StdlibDirs(stdlibdir, exe);
-        ParseProgram(ast, filename, stdlibdirs, DirOf(exe));
+        optional<PackageGraph> graph;
+        if (!packagegraphfile.empty()) {
+
+            graph = ReadPackageGraph(packagegraphfile, filename, CompilerSourceRevision());
+        }
+        ParseProgram(ast, filename, stdlibdirs, DirOf(exe), {}, graph ? &*graph : nullptr);
         // The parser reported what it recovered from as it went; nothing
         // further is asked of a program with a syntax error.
         if (!ast.errors.empty()) return 1;
