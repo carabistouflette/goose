@@ -2480,6 +2480,7 @@ struct Package {
 
     // Resolved graph metadata; empty identity means legacy acquisition.
     string identity, entry, entry_namespace;
+    set<string, std::less<>> features;
     map<string, int> bindings;
 
     bool HasNative() const { return !csources.empty() || !cmake_target.empty(); }

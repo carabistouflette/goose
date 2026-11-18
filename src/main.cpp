@@ -204,6 +204,7 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
             Package package { node.name, PackageDir(node.directory), false };
             package.identity = node.identity; package.entry = node.entry;
             package.entry_namespace = node.entry_namespace; package.bindings = node.bindings;
+            package.features = node.features;
             for (auto &[alias, target] : node.bindings) package.required.push_back(target);
             LoadSidecar(package, ast.packages.empty());
             if (package.HasNative() || !package.cheaders.empty() || !package.dylibs.empty() ||
@@ -1399,7 +1400,7 @@ int Main(int argc, char **argv) {
             string report = "{\"schema\":1,\"compiler_revision\":";
             JsonQuote(report, CompilerSourceRevision()); report += ",\"compiler_version\":";
             JsonQuote(report, CompilerVersion()); report += ",\"runtime\":";
-            JsonQuote(report, RuntimeVersion()); report += ",\"package_graph\":\"goose-package-graph-v1\",\"package_graph_native\":false,\"package_graph_tooling\":false}\n";
+            JsonQuote(report, RuntimeVersion()); report += ",\"package_graph\":\"goose-package-graph-v1\",\"package_graph_features\":true,\"package_graph_native\":false,\"package_graph_tooling\":false}\n";
             fputs(report.c_str(), stdout); return 0;
         }
         printf("goose %s (runtime %s)\n", CompilerVersion(), RuntimeVersion().c_str());

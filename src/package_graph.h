@@ -7,6 +7,7 @@ struct GraphPackage {
     map<string, int> bindings;
     map<string, string> targets;
     string identity, canonical;
+    set<string, std::less<>> features;
 };
 struct PackageGraph {
     vector<GraphPackage> nodes;  // Deduplicated, root first; other instances identity-sorted.
@@ -115,7 +116,22 @@ inline PackageGraph ReadPackageGraph(const string &file, const string &rootpath,
         auto entry = GraphPath(p.directory + '/' + p.entry);
         if (!GraphContains(p.directory, entry) || !filesystem::is_regular_file(entry, ec)) GraphError("missing entry or entry escapes its package directory");
         auto config = node.Get("config");
-        if (!config || config->kind != Json::OBJECT || !config->obj.empty()) GraphError("only empty compilation config is supported by graph v1");
+        if (!config) GraphError("missing compilation config");
+        GraphKeys(*config, {"features"});
+        if (auto features = config->Get("features")) {
+            if (features->kind != Json::ARRAY || features->arr.size() > 256)
+                GraphError("features must be an array of at most 256 names");
+            for (auto &feature : features->arr) {
+                auto &name = feature.str;
+                if (feature.kind != Json::STRING || name.empty() || name.size() > 64 ||
+                    name.front() < 'a' || name.front() > 'z' ||
+                    !all_of(name.begin(), name.end(), [](char c) {
+                        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+                    }))
+                    GraphError("invalid feature name");
+                if (!p.features.insert(name).second) GraphError("duplicate feature name");
+            }
+        }
         auto bindings = node.Get("bindings");
         if (!bindings || bindings->kind != Json::OBJECT || bindings->obj.size() > 256) GraphError("invalid dependency bindings");
         for (auto &[alias, target] : bindings->obj) {
@@ -137,6 +153,10 @@ inline PackageGraph ReadPackageGraph(const string &file, const string &rootpath,
         string canonical;
         for (auto &field : {string("goose-package-instance-v1"), compiler_revision, p.locator, p.revision, p.name, p.subdir, p.entry, p.entry_namespace}) PackageIdentityField(canonical, field);
         for (auto &[alias, target] : p.bindings) { fingerprint(target); PackageIdentityField(canonical, alias); PackageIdentityField(canonical, parsed[target].identity); }
+        if (!p.features.empty()) {
+            PackageIdentityField(canonical, ":features-v1");
+            for (auto &name : p.features) PackageIdentityField(canonical, name);
+        }
         p.canonical = std::move(canonical); p.identity = PackageSha256(p.canonical); state[i] = 2;
     };
     for (int i = 0; i < (int)parsed.size(); ++i) fingerprint(i);
