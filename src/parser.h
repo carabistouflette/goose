@@ -415,12 +415,46 @@ struct Parser {
         }
     }
 
-    void ParseTopDeclInner() {
+    void ParseFeatureBlock(bool enabled, int depth) {
+        Expect(T_LCURLY, "feature block");
+        if (enabled) {
+            while (lex.tok != T_RCURLY && lex.tok != T_EOF)
+                ParseTopDeclInner(depth);
+        } else {
+            int braces = 1;
+            while (braces && lex.tok != T_EOF) {
+                if (lex.tok == T_LCURLY) braces++;
+                if (lex.tok == T_RCURLY && --braces == 0) break;
+                lex.Next();
+            }
+        }
+        Expect(T_RCURLY, "feature block");
+    }
+
+    void ParseFeatureDecl(int depth) {
+        if (!ast.package_graph || ast.StdlibFile(fileidx))
+            Error("top-level feature blocks require a resolved package graph");
+        if (depth >= 32) Error("feature block nesting limit exceeded");
+        Expect(T_IF, "feature condition");
+        if (ExpectIdent("feature condition") != "feature")
+            Error("expected feature(\"name\") in top-level condition");
+        Expect(T_LPAREN, "feature condition");
+        if (lex.tok != T_STRLIT) Error("expected a feature name string");
+        auto enabled = ast.packages[ast.filepkg[fileidx]].features.count(lex.sval) != 0;
+        lex.Next();
+        Expect(T_RPAREN, "feature condition");
+        ParseFeatureBlock(enabled, depth + 1);
+        if (IsNext(T_ELSE)) ParseFeatureBlock(!enabled, depth + 1);
+    }
+
+    void ParseTopDeclInner(int feature_depth = 0) {
         auto line = CurLine();
         auto doc = lex.doc;
         curns = filens;
         switch (lex.tok) {
+            case T_IF: ParseFeatureDecl(feature_depth); return;
             case T_NAMESPACE: {
+                if (feature_depth) Error("namespace must be declared outside feature blocks");
                 // `namespace name;`: at most once, ahead of the declarations
                 // (imports may come either side of it).
                 lex.Next();

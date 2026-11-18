@@ -91,6 +91,39 @@ class PackageIdentity(unittest.TestCase):
         self.graph([dep2, b, app, a, dep1])
         self.assertEqual(self.command('run').stdout.strip(), '1 2 11 12')
 
+    def test_features_isolate_same_source_and_skip_optional_imports(self):
+        code = ('namespace client; if feature("extra") { import dep; '
+                'if feature("unused") { fn answer() -> i64 { unresolved() } } '
+                'else { fn answer() -> i64 { dep::value() } } } '
+                'else { fn answer() -> i64 { 1 } }')
+        a = self.node('a', code, 'client', {'dep': 'dep'}, directory='client', package='client')
+        b = copy.deepcopy(a)
+        b['key'] = 'b'
+        a['config'] = {'features': ['extra']}
+        dep = self.node('dep', 'namespace dep; fn value() -> i64 { 7 }', 'dep')
+        app = self.node('app', 'import a; import b; import std; fn main() { print(a::answer(), " ", b::answer()); }',
+                        bindings={'a': 'a', 'b': 'b'})
+        self.graph([app, a, b, dep])
+        self.assertEqual(self.command('run').stdout.strip(), '7 1')
+        b['bindings'] = {}
+        self.graph([app, a, b, dep])
+        self.assertEqual(self.command('run').stdout.strip(), '7 1')
+
+    def test_feature_order_is_canonical_and_duplicates_are_invalid(self):
+        code = 'namespace dep; var count: i64 = 0; fn next() -> i64 { count++; count }'
+        a = self.node('a', code, 'dep')
+        b = copy.deepcopy(a)
+        b['key'] = 'b'
+        a['config'] = {'features': ['one', 'two']}
+        b['config'] = {'features': ['two', 'one']}
+        app = self.node('app', 'import a; import b; import std; fn main() { let x = a::next(); print(x, " ", b::next()); }',
+                        bindings={'a': 'a', 'b': 'b'})
+        self.graph([app, a, b])
+        self.assertEqual(self.command('run').stdout.strip(), '1 2')
+        b['config']['features'] = ['one', 'one']
+        self.graph([app, a, b])
+        self.assertIn('duplicate feature name', self.command('check', ok=False).stderr)
+
     def test_two_aliases_of_one_instance_share_globals(self):
         dep = self.node('dep', 'namespace versioned; var counter: i64 = 0; fn hit() -> i64 { counter++; counter }', 'versioned')
         duplicate = copy.deepcopy(dep)

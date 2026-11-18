@@ -60,7 +60,9 @@ The producer verifies acquisition, source provenance and snapshot freshness.
 producer interface, not a source integrity or sandbox boundary. The compiler
 does validate graph consistency, cycles, entry existence and import containment.
 
-Only empty `config` is supported. Bindings map valid Goose identifier aliases
+`config.features` is an optional array of up to 256 distinct feature names.
+Names start with a lowercase ASCII letter and may contain lowercase letters,
+digits, hyphens, and underscores, up to 64 bytes. Bindings map valid Goose identifier aliases
 to graph keys; `std` and `os` are reserved. A package entry's declared namespace
 must match `entry_namespace`. No dependency declarations are added to source:
 
@@ -81,6 +83,27 @@ inside dependencies. Generic bodies and defaults retain their definition scope.
 Module imports, as before, determine initialization order; declaring a binding
 does not execute an unimported package.
 
+## Conditional declarations
+
+A file in a graph package can select declarations and imports using its
+own instance's features:
+
+```goose
+namespace codec;
+if feature("json") {
+    import json_codec;
+    fn format() -> i64 { json_codec::format() }
+} else {
+    fn format() -> i64 { 0 }
+}
+```
+
+The compiler parses declarations only in the selected branch. The other
+branch must tokenize and have balanced braces. Blocks can nest up to 32 levels.
+Keep the namespace directive outside feature blocks. The graph producer supplies
+active names and bindings. An absent feature selects the else branch.
+Compiler capability reports advertise this extension as `package_graph_features: true`.
+
 ## Identity and generated symbols
 
 Identity is SHA-256 of a length-delimited canonical record. Each field is an
@@ -92,8 +115,8 @@ eight-byte big-endian UTF-8 byte length followed by the bytes. Initial fields:
 4. Entry path and entry namespace
 
 Append each outgoing alias followed by its target's full identity, in bytewise
-alias order. Compute bottom-up over the acyclic graph. Config is fixed empty in
-v1; introducing effective configuration requires a new schema/identity contract.
+alias order. For nonempty features, append the field `:features-v1` followed
+by the names in bytewise order. Compute bottom-up over the acyclic graph.
 Physical directories, graph row order, node keys and incoming aliases do not
 contribute. The full canonical records are compared when digests coincide.
 One identity cannot claim different materialization directories in one graph.
